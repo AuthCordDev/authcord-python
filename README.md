@@ -1,5 +1,7 @@
 # AuthCord Python SDK
 
+> [AuthCord](https://authcord.dev) - Sell, authenticate, and manage your software. All in one place. Replace your auth system, payment platform, and Discord bots with a single dashboard.
+
 Official Python SDK for the AuthCord authentication platform.
 
 ## Installation
