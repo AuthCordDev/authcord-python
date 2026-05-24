@@ -62,6 +62,31 @@ result = client.validate(
 )
 ```
 
+## Real-time Session Kick (Heartbeat)
+
+After `validate()` succeeds, run a background heartbeat so an admin clicking **Terminate** in the dashboard takes effect within ~10 seconds instead of waiting for the user's next manual validate.
+
+```python
+def on_terminated(hb):
+    print(f"Session ended: {hb.reason}")  # "terminated", "banned", "expired", ...
+    # Tear down: close the app, redirect to login, clear in-memory secrets, etc.
+    sys.exit(0)
+
+loop = client.start_heartbeat(
+    app_id="your_app_id",
+    discord_id="123456789012345678",
+    hwid="unique_hardware_id",
+    on_terminated=on_terminated,
+    # on_error=lambda e: ...,    # optional; loop keeps running on transient errors
+    # interval=10,                # optional; otherwise the server controls cadence
+)
+
+# ... your app does its thing ...
+loop.stop()   # clean shutdown on normal sign-out
+```
+
+For a DeviceSession-based flow, pass `session_token=...` instead of `discord_id` + `hwid`. Full runnable example in `examples/heartbeat_realtime.py`.
+
 ## Session-Based Auth (Desktop Apps)
 
 ```python
@@ -112,6 +137,7 @@ result = client.verify_offline(
 
 - User validation with HWID protection
 - Session-based auth for desktop apps
+- **Real-time session kick** via background heartbeat (~10s detection of admin Terminate)
 - Entitlements and remote config support
 - Grace period / soft enforcement modes
 - Offline token generation and verification

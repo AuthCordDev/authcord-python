@@ -1,16 +1,34 @@
 """Main AuthCord client class."""
 
 from __future__ import annotations
+import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ._http import HTTPClient
 from .models import (
     ValidationResult, User, Product, File, HwidResult,
     SessionCreateResult, Session, OfflineToken, PublicKey,
-    SessionInfo,
+    SessionInfo, HeartbeatResult,
 )
 from .offline import verify_offline_token as _verify_offline
+
+
+class HeartbeatLoop:
+    """Background heartbeat task. Stop with ``.stop()``."""
+
+    def __init__(self, thread: threading.Thread, stop_event: threading.Event):
+        self._thread = thread
+        self._stop = stop_event
+
+    def stop(self, *, wait: bool = True, timeout: float = 5.0) -> None:
+        self._stop.set()
+        if wait:
+            self._thread.join(timeout=timeout)
+
+    @property
+    def is_running(self) -> bool:
+        return self._thread.is_alive() and not self._stop.is_set()
 
 
 def _parse_dt(val: Any) -> Optional[datetime]:
@@ -129,6 +147,95 @@ class AuthCordClient:
         r = self._http.post("/api/v1/auth/sessions/revoke", json={"session_token": session_token})
         return r.get("success", False)
 
+    def heartbeat(
+        self,
+        app_id: str,
+        *,
+        discord_id: Optional[str] = None,
+        hwid: Optional[str] = None,
+        session_token: Optional[str] = None,
+    ) -> HeartbeatResult:
+        """Single heartbeat check — returns whether the user's session is
+        still live.
+
+        Pass ``session_token`` (for DeviceSession-based flows) OR both
+        ``discord_id`` and ``hwid`` (for validate-only flows). Returns a
+        :class:`HeartbeatResult` with ``valid`` plus a ``reason`` like
+        ``"terminated"``, ``"banned"``, ``"paused"``, ``"expired"``, or
+        ``"hwid_unbound"`` when invalid.
+        """
+        if not session_token and not (discord_id and hwid):
+            raise ValueError("Provide session_token, or both discord_id and hwid")
+        body: Dict[str, Any] = {"app_id": app_id}
+        if session_token: body["session_token"] = session_token
+        if discord_id: body["discord_id"] = discord_id
+        if hwid: body["hwid"] = hwid
+        r = self._http.post("/api/v1/auth/heartbeat", json=body)
+        return HeartbeatResult(
+            valid=bool(r.get("valid")),
+            reason=r.get("reason"),
+            next_heartbeat_in=int(r.get("next_heartbeat_in") or 10),
+        )
+
+    def start_heartbeat(
+        self,
+        app_id: str,
+        on_terminated: Callable[[HeartbeatResult], None],
+        *,
+        discord_id: Optional[str] = None,
+        hwid: Optional[str] = None,
+        session_token: Optional[str] = None,
+        interval: Optional[float] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+    ) -> HeartbeatLoop:
+        """Start a daemon background thread that polls the heartbeat
+        endpoint and fires ``on_terminated`` exactly once when the server
+        returns ``valid=False``.
+
+        After ``on_terminated`` fires, the loop stops automatically — your
+        app is expected to log the user out and exit / return to login.
+
+        ``interval`` is the seconds between polls. When omitted, the server
+        decides via the ``next_heartbeat_in`` field (default 10s). Network
+        errors are reported via ``on_error`` and the loop keeps running.
+        """
+        if not session_token and not (discord_id and hwid):
+            raise ValueError("Provide session_token, or both discord_id and hwid")
+
+        stop_event = threading.Event()
+
+        def _loop() -> None:
+            wait_seconds = float(interval) if interval is not None else 10.0
+            while not stop_event.is_set():
+                if stop_event.wait(timeout=wait_seconds):
+                    return  # stopped during sleep
+                try:
+                    result = self.heartbeat(
+                        app_id,
+                        discord_id=discord_id,
+                        hwid=hwid,
+                        session_token=session_token,
+                    )
+                except Exception as exc:  # network error, rate limit, etc.
+                    if on_error is not None:
+                        try:
+                            on_error(exc)
+                        except Exception:
+                            pass
+                    continue
+                if not result.valid:
+                    try:
+                        on_terminated(result)
+                    finally:
+                        return
+                # Honour server-suggested interval when caller didn't pin it
+                if interval is None:
+                    wait_seconds = max(1.0, float(result.next_heartbeat_in))
+
+        thread = threading.Thread(target=_loop, name="authcord-heartbeat", daemon=True)
+        thread.start()
+        return HeartbeatLoop(thread=thread, stop_event=stop_event)
+
     def revoke_all_sessions(self, discord_id: str, app_id: str) -> int:
         """Revoke all sessions for a user in an app. Returns count revoked."""
         r = self._http.post("/api/v1/auth/sessions/revoke", json={"discord_id": discord_id, "app_id": app_id})
@@ -171,7 +278,7 @@ class AuthCordClient:
         if email: body["email"] = email
         if product_id: body["product_id"] = product_id
         if hwid: body["hwid"] = hwid
-        if ttl: body["ttl"] = ttl
+        if ttl is not None: body["ttl"] = ttl
 
         r = self._http.post("/api/v1/auth/offline-token", json=body)
         return OfflineToken(

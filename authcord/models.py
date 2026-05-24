@@ -99,3 +99,21 @@ class OfflineToken:
 class PublicKey:
     public_key: str
     algorithm: str
+
+
+@dataclass
+class HeartbeatResult:
+    """Result of a heartbeat check.
+
+    ``valid`` is False when the session has been terminated by an admin, the
+    user has been banned/paused, the product expired, or the HWID was
+    unbound. ``reason`` carries a machine-readable code so the client can
+    branch on it (e.g. ``"terminated"`` vs ``"banned"`` vs ``"expired"``).
+
+    ``next_heartbeat_in`` is server-controlled: when ``valid`` is True it
+    defaults to 10s, but the server may bump it during incidents or for
+    rate-limited clients. The auto-heartbeat loop honours this hint.
+    """
+    valid: bool
+    reason: Optional[str]
+    next_heartbeat_in: int = 10

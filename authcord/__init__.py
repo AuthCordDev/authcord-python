@@ -1,12 +1,12 @@
 """AuthCord Python SDK - Official client library for AuthCord authentication."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
-from .client import AuthCordClient
+from .client import AuthCordClient, HeartbeatLoop
 from .models import (
     User, Product, File, HwidResult, ValidationResult,
     Session, SessionCreateResult, OfflineToken, PublicKey,
-    SessionInfo,
+    SessionInfo, HeartbeatResult,
 )
 from .exceptions import (
     AuthCordError, AuthenticationError, ValidationError,
@@ -14,9 +14,10 @@ from .exceptions import (
 )
 
 __all__ = [
-    "AuthCordClient",
+    "AuthCordClient", "HeartbeatLoop",
     "User", "Product", "File", "HwidResult", "ValidationResult",
     "Session", "SessionCreateResult", "OfflineToken", "PublicKey", "SessionInfo",
+    "HeartbeatResult",
     "AuthCordError", "AuthenticationError", "ValidationError",
     "APIError", "NetworkError", "OfflineTokenError", "RateLimitError",
 ]
