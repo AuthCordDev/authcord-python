@@ -102,6 +102,36 @@ class PublicKey:
 
 
 @dataclass
+class HwidComponents:
+    """Structured HWID components the SDK can send alongside (or instead of)
+    a single opaque ``hwid`` string. The server hashes a subset of these
+    — controlled by the app's HWID Strategy in the dashboard — into the
+    canonical HWID used for slot matching.
+
+    Typical temp HWID spoofers (used by cheaters to evade FiveM-style
+    bans) change SMBIOS UUID, disk serial, MAC, and MachineGuid — but
+    NOT the Windows User SID or CPUID. Apps set to ``STABLE`` hash only
+    (sid + cpu_id), so users stay bound across spoofs.
+    """
+    sid: Optional[str] = None           # Windows User SID — survives temp spoofers
+    cpu_id: Optional[str] = None        # CPUID signature — silicon
+    machine_guid: Optional[str] = None  # HKLM\\SOFTWARE\\Microsoft\\Cryptography\\MachineGuid
+    mac: Optional[str] = None           # primary NIC MAC
+    disk: Optional[str] = None          # boot disk serial
+
+    def to_dict(self) -> Dict[str, str]:
+        """Return only the fields that are set, lowercase keys ready to
+        send as the request body's ``hwid_components`` object."""
+        return {k: v for k, v in {
+            "sid": self.sid,
+            "cpu_id": self.cpu_id,
+            "machine_guid": self.machine_guid,
+            "mac": self.mac,
+            "disk": self.disk,
+        }.items() if v}
+
+
+@dataclass
 class HeartbeatResult:
     """Result of a heartbeat check.
 

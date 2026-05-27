@@ -9,9 +9,82 @@ from ._http import HTTPClient
 from .models import (
     ValidationResult, User, Product, File, HwidResult,
     SessionCreateResult, Session, OfflineToken, PublicKey,
-    SessionInfo, HeartbeatResult,
+    SessionInfo, HeartbeatResult, HwidComponents,
 )
 from .offline import verify_offline_token as _verify_offline
+
+
+def collect_hwid_components() -> HwidComponents:
+    """Best-effort collector for spoofer-resistant HWID components.
+
+    On Windows: populates ``sid`` (User SID via wmic/whoami fallback),
+    ``cpu_id`` (CPUID via wmic), and ``machine_guid`` (registry).
+
+    On non-Windows: returns an empty :class:`HwidComponents`. Cross-
+    platform callers should fill the struct themselves with whatever
+    stable identifiers their platform exposes, then pass it to
+    :meth:`AuthCordClient.validate`.
+    """
+    import sys
+    out = HwidComponents()
+    if not sys.platform.startswith("win"):
+        return out
+
+    # ── Windows User SID ──
+    # Stable across temp HWID spoofers because changing it would break
+    # the user's Windows profile.
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=5,
+        )
+        # Output is e.g. "DESKTOP-XYZ\\charlie","S-1-5-21-...-1001"
+        if r.returncode == 0 and r.stdout:
+            parts = [p.strip().strip('"') for p in r.stdout.strip().split(",")]
+            for part in parts:
+                if part.startswith("S-1-5-"):
+                    out.sid = part
+                    break
+    except Exception:
+        pass
+
+    # ── Windows MachineGuid ──
+    try:
+        import winreg  # type: ignore
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Cryptography",
+            0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            val, _ = winreg.QueryValueEx(key, "MachineGuid")
+            if val:
+                out.machine_guid = str(val)
+    except Exception:
+        pass
+
+    # ── CPU ID ──
+    # Use the wmic ProcessorId. Not unique per chip (Intel deprecated PSN
+    # in P3) but stable across reboots and spoofers, which is all we need.
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["wmic", "cpu", "get", "ProcessorId", "/value"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                if line.startswith("ProcessorId="):
+                    val = line.split("=", 1)[1].strip()
+                    if val:
+                        out.cpu_id = val
+                        break
+    except Exception:
+        pass
+
+    return out
 
 
 class HeartbeatLoop:
@@ -68,6 +141,7 @@ class AuthCordClient:
         email: Optional[str] = None,
         product_id: Optional[str] = None,
         hwid: Optional[str] = None,
+        hwid_components: Optional[HwidComponents] = None,
         ip: Optional[str] = None,
         user_agent: Optional[str] = None,
         device_meta: Optional[Dict[str, Any]] = None,
@@ -86,6 +160,10 @@ class AuthCordClient:
         if email: body["email"] = email
         if product_id: body["product_id"] = product_id
         if hwid: body["hwid"] = hwid
+        if hwid_components:
+            comps = hwid_components.to_dict()
+            if comps:
+                body["hwid_components"] = comps
         if ip: body["ip"] = ip
         if user_agent: body["user_agent"] = user_agent
         if device_meta: body["device_meta"] = device_meta
@@ -153,23 +231,31 @@ class AuthCordClient:
         *,
         discord_id: Optional[str] = None,
         hwid: Optional[str] = None,
+        hwid_components: Optional[HwidComponents] = None,
         session_token: Optional[str] = None,
     ) -> HeartbeatResult:
         """Single heartbeat check — returns whether the user's session is
         still live.
 
-        Pass ``session_token`` (for DeviceSession-based flows) OR both
-        ``discord_id`` and ``hwid`` (for validate-only flows). Returns a
-        :class:`HeartbeatResult` with ``valid`` plus a ``reason`` like
-        ``"terminated"``, ``"banned"``, ``"paused"``, ``"expired"``, or
-        ``"hwid_unbound"`` when invalid.
+        Pass ``session_token`` (for DeviceSession-based flows) OR
+        ``discord_id`` plus EITHER ``hwid`` (legacy) or
+        ``hwid_components`` (validates against STABLE/STRICT apps).
+
+        Returns a :class:`HeartbeatResult` with ``valid`` plus a ``reason``
+        like ``"terminated"``, ``"banned"``, ``"paused"``, ``"expired"``,
+        or ``"hwid_unbound"`` when invalid.
         """
-        if not session_token and not (discord_id and hwid):
-            raise ValueError("Provide session_token, or both discord_id and hwid")
+        has_hwid_signal = bool(hwid) or bool(hwid_components and hwid_components.to_dict())
+        if not session_token and not (discord_id and has_hwid_signal):
+            raise ValueError("Provide session_token, or discord_id with hwid or hwid_components")
         body: Dict[str, Any] = {"app_id": app_id}
         if session_token: body["session_token"] = session_token
         if discord_id: body["discord_id"] = discord_id
         if hwid: body["hwid"] = hwid
+        if hwid_components:
+            comps = hwid_components.to_dict()
+            if comps:
+                body["hwid_components"] = comps
         r = self._http.post("/api/v1/auth/heartbeat", json=body)
         return HeartbeatResult(
             valid=bool(r.get("valid")),
@@ -184,6 +270,7 @@ class AuthCordClient:
         *,
         discord_id: Optional[str] = None,
         hwid: Optional[str] = None,
+        hwid_components: Optional[HwidComponents] = None,
         session_token: Optional[str] = None,
         interval: Optional[float] = None,
         on_error: Optional[Callable[[Exception], None]] = None,
@@ -199,8 +286,9 @@ class AuthCordClient:
         decides via the ``next_heartbeat_in`` field (default 10s). Network
         errors are reported via ``on_error`` and the loop keeps running.
         """
-        if not session_token and not (discord_id and hwid):
-            raise ValueError("Provide session_token, or both discord_id and hwid")
+        has_hwid_signal = bool(hwid) or bool(hwid_components and hwid_components.to_dict())
+        if not session_token and not (discord_id and has_hwid_signal):
+            raise ValueError("Provide session_token, or discord_id with hwid or hwid_components")
 
         stop_event = threading.Event()
 
@@ -214,6 +302,7 @@ class AuthCordClient:
                         app_id,
                         discord_id=discord_id,
                         hwid=hwid,
+                        hwid_components=hwid_components,
                         session_token=session_token,
                     )
                 except Exception as exc:  # network error, rate limit, etc.
