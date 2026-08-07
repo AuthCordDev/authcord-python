@@ -144,6 +144,38 @@ result = client.verify_offline(
 - Automatic retry logic for network errors
 - Type hints throughout
 
+## Admin operations (server-side, FULL key only)
+
+`pause_product`, `unpause_product` and `reset_hwid` mutate user state and
+require a **FULL** API key (a CLIENT key is rejected with 403). They do **not**
+raise on the expected "not found" cases — inspect `.success`, `.error` (machine
+code) and `.reason` (human string). Omit `product_id` to apply to every product
+the user owns on the app.
+
+`reset_hwid` respects the app's HWID reset cooldown (products still inside it
+are skipped with `on_cooldown: true`; the call returns 409 `cooldown_active`
+when every target was blocked). Pass `bypass_cooldown=True` for an admin
+override, `hwid=` to clear one device slot, and `reason=` for the reset log.
+Scoped API keys need the `devices:reset` scope; resets are attributed to the
+calling key in the reset and audit logs.
+
+```python
+res = client.pause_product(
+    "app_id", "discord_id", days=7,
+    reason="chargeback hold", paused_by="discord:999",
+)
+if res.success:
+    print("Paused:", res.paused)
+elif res.error == "user_not_found":
+    print("Not on AuthCord yet:", res.reason)  # pre-cutover case
+else:
+    print(f"{res.status} {res.error}: {res.reason}")
+
+client.unpause_product("app_id", "discord_id")  # all products
+client.reset_hwid("app_id", "discord_id")        # cooldown-gated, idempotent
+client.reset_hwid("app_id", "discord_id", bypass_cooldown=True, reason="ticket #123")
+```
+
 ## License
 
 MIT

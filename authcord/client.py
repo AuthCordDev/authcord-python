@@ -10,6 +10,7 @@ from .models import (
     ValidationResult, User, Product, File, HwidResult,
     SessionCreateResult, Session, OfflineToken, PublicKey,
     SessionInfo, HeartbeatResult, HwidComponents,
+    PausedProduct, PauseResult, UnpauseResult, ResetHwidResult,
 )
 from .offline import verify_offline_token as _verify_offline
 
@@ -343,6 +344,106 @@ class AuthCordClient:
             )
             for s in r.get("sessions", [])
         ]
+
+    # ------------------------------------------------------------------
+    # Admin operations — server-side only, require a FULL API key.
+    # ------------------------------------------------------------------
+
+    def pause_product(
+        self,
+        app_id: str,
+        discord_id: str,
+        days: int,
+        *,
+        product_id: Optional[str] = None,
+        reason: Optional[str] = None,
+        paused_by: Optional[str] = None,
+    ) -> PauseResult:
+        """Pause (freeze the expiry clock) one product — or every product the
+        user owns on the app when ``product_id`` is omitted — for ``days`` days.
+
+        **Server-side only. Requires a FULL API key** (a CLIENT key gets 403).
+
+        Does not raise on the expected 404 cases (app/user/product not found,
+        user owns nothing) or the 409 already-paused case — inspect
+        ``result.success``, ``result.error`` and ``result.reason``. Auth (401),
+        rate-limit (429), network and server (5xx) errors still raise.
+        """
+        body: Dict[str, Any] = {"app_id": app_id, "discord_id": discord_id, "days": days}
+        if product_id: body["product_id"] = product_id
+        if reason is not None: body["reason"] = reason
+        if paused_by is not None: body["paused_by"] = paused_by
+        status, data = self._http.request_raw("POST", "/api/v1/products/pause", json=body)
+        return PauseResult(
+            success=bool(data.get("success", 200 <= status < 300)),
+            status=status,
+            paused=[PausedProduct(**{k: p.get(k) for k in ("product_id", "paused_at", "pause_ends_at", "frozen_expires_at")})
+                    for p in (data.get("paused") or [])],
+            error=data.get("error"),
+            reason=data.get("reason"),
+            message=data.get("message"),
+        )
+
+    def unpause_product(
+        self,
+        app_id: str,
+        discord_id: str,
+        *,
+        product_id: Optional[str] = None,
+    ) -> UnpauseResult:
+        """Unpause one product — or every paused product on the app when
+        ``product_id`` is omitted. Idempotent. **Requires a FULL API key.**
+        Same error semantics as :meth:`pause_product`."""
+        body: Dict[str, Any] = {"app_id": app_id, "discord_id": discord_id}
+        if product_id: body["product_id"] = product_id
+        status, data = self._http.request_raw("POST", "/api/v1/products/unpause", json=body)
+        return UnpauseResult(
+            success=bool(data.get("success", 200 <= status < 300)),
+            status=status,
+            unpaused=list(data.get("unpaused") or []),
+            error=data.get("error"),
+            reason=data.get("reason"),
+        )
+
+    def reset_hwid(
+        self,
+        app_id: str,
+        discord_id: str,
+        *,
+        product_id: Optional[str] = None,
+        hwid: Optional[str] = None,
+        bypass_cooldown: bool = False,
+        reason: Optional[str] = None,
+    ) -> ResetHwidResult:
+        """Clear the HWID binding(s) for a user on one product — or every
+        product the user owns on the app when ``product_id`` is omitted — so
+        they can re-bind on a new machine. Idempotent for unbound products.
+
+        The app's HWID reset cooldown applies (same rule as dashboard and
+        self-service resets): a product still inside its cooldown is skipped
+        with ``on_cooldown: true``, and the call returns HTTP 409
+        ``cooldown_active`` if every targeted product was blocked. Pass
+        ``bypass_cooldown=True`` for an explicit admin override.
+
+        Pass ``hwid`` (requires ``product_id``) to clear a single device slot
+        instead of all of them. ``reason`` is stored in the reset log.
+
+        **Requires a FULL API key**; scoped keys need the ``devices:reset``
+        scope. Resets are attributed to the calling key in the reset and
+        audit logs. Same error semantics as :meth:`pause_product`."""
+        body: Dict[str, Any] = {"app_id": app_id, "discord_id": discord_id}
+        if product_id: body["product_id"] = product_id
+        if hwid: body["hwid"] = hwid
+        if bypass_cooldown: body["bypass_cooldown"] = True
+        if reason: body["reason"] = reason
+        status, data = self._http.request_raw("POST", "/api/v1/products/reset-hwid", json=body)
+        return ResetHwidResult(
+            success=bool(data.get("success", 200 <= status < 300)),
+            status=status,
+            reset=list(data.get("reset") or []),
+            error=data.get("error"),
+            reason=data.get("reason"),
+        )
 
     def get_offline_token(
         self,

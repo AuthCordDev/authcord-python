@@ -62,6 +62,48 @@ class HTTPClient:
                 raise NetworkError(f"Request failed after {self.max_retries} attempts: {e}")
         raise NetworkError("Request failed")
 
+    def _handle_response_raw(self, response: httpx.Response):
+        """Like ``_handle_response`` but for admin endpoints whose 4xx
+        responses carry a meaningful JSON body ({success, error, reason}).
+        Returns ``(status_code, body)`` instead of raising on those. Still
+        raises on auth (401), rate-limit (429) and server (5xx) errors."""
+        if response.status_code == 401:
+            raise AuthenticationError("Invalid API key")
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", "60"))
+            raise RateLimitError(retry_after=retry_after)
+        if response.status_code >= 500:
+            try:
+                data = response.json()
+                msg = data.get("message", data.get("error", f"HTTP {response.status_code}"))
+            except Exception:
+                msg = f"HTTP {response.status_code}"
+            raise APIError(msg, status_code=response.status_code)
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        return response.status_code, body
+
+    def request_raw(self, method: str, path: str, **kwargs: Any):
+        """POST/GET that returns ``(status, body)`` without raising on 404/409
+        (used by the admin pause/unpause/reset-hwid helpers)."""
+        url = f"{self.base_url}{path}"
+        for attempt in range(self.max_retries):
+            try:
+                response = self._client.request(method, url, **kwargs)
+                return self._handle_response_raw(response)
+            except RateLimitError:
+                raise
+            except APIError:
+                raise
+            except (httpx.NetworkError, httpx.TimeoutException) as e:
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise NetworkError(f"Request failed after {self.max_retries} attempts: {e}")
+        raise NetworkError("Request failed")
+
     def get(self, path: str, **kwargs: Any) -> Dict[str, Any]:
         return self.request("GET", path, **kwargs)
 

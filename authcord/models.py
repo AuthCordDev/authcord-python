@@ -147,3 +147,49 @@ class HeartbeatResult:
     valid: bool
     reason: Optional[str]
     next_heartbeat_in: int = 10
+
+
+# ---------------------------------------------------------------------------
+# Admin operation results (server-side, FULL API key only)
+#
+# ``success`` is False for the expected 404 cases (carrying a machine ``error``
+# code + human ``reason``) and the 409 already-paused case. Inspect it before
+# reading the data fields.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PausedProduct:
+    product_id: str
+    paused_at: Optional[str] = None
+    pause_ends_at: Optional[str] = None
+    frozen_expires_at: Optional[str] = None
+
+
+@dataclass
+class PauseResult:
+    success: bool
+    status: int
+    paused: List[PausedProduct] = field(default_factory=list)
+    error: Optional[str] = None    # machine code: "user_not_found", "already_paused", ...
+    reason: Optional[str] = None   # human string (404 cases)
+    message: Optional[str] = None  # 409 already-paused message
+
+
+@dataclass
+class UnpauseResult:
+    success: bool
+    status: int
+    unpaused: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class ResetHwidResult:
+    success: bool
+    status: int
+    # Per-product count of HWID bindings cleared. Idempotent: a product with
+    # nothing bound reports ``cleared_hwids: 0``.
+    reset: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+    reason: Optional[str] = None
